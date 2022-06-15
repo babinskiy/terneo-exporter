@@ -14,6 +14,9 @@ from prometheus_client import start_http_server, Summary, Counter, Gauge, Info
 
 from metrics import metrics_settings
 
+read_device_timer = 25.0
+gc_device_timer = 7.0
+
 devices = {}
 metrics = {}
 
@@ -22,6 +25,7 @@ gc_devices_thread = None
 
 
 def set_metric_gauge(metric, data, labels=None):
+    global devices, metrics
     if metric not in metrics:
         metrics[metric] = Gauge(metrics_settings[metric]['name'],
                                 metrics_settings[metric]['description'],
@@ -30,6 +34,7 @@ def set_metric_gauge(metric, data, labels=None):
 
 
 def update_metrics(device, data):
+    global devices, metrics
     labels = { 'sn':      device,
                'address': devices[device]['address'],
                'hw':      devices[device]['hw']}
@@ -45,13 +50,20 @@ def update_metrics(device, data):
         # TODO: Add other types of metric
 
 def gc_devices():
-    threading.Timer(7.0, gc_devices).start()
+    global devices
+    global gc_devices_thread, gc_device_timer
+    gc_devices_thread = threading.Timer(gc_device_timer, gc_devices)
+    gc_devices_thread.start()
+
+    info('Devices GC process is started')
+
     for device in devices.keys():
         if time.time() - devices[device]['lastSeen'] > 300:
             warning('Devise %s is outdated. Removing' % device)
             del devices[device]
 
 def read_device(device):
+    global devices
     debug("Start reading data from: %s" % device)
     debug('Sending query to %s', devices[device]['address'])
     req = requests.post("http://%s/api.cgi" % devices[device]['address'], data='{"cmd": 4}', timeout=5)
@@ -64,7 +76,11 @@ def read_device(device):
         return None
 
 def read_devices():
-    threading.Timer(15.0, read_devices).start()
+    global devices
+    global read_devices_thread, read_device_timer
+    read_devices_thread = threading.Timer(read_device_timer, read_devices)
+    read_devices_thread.start()
+
     for device in devices.keys():
         metric_data = read_device(device)
         update_metrics(device, metric_data)
@@ -86,20 +102,20 @@ def __configure_logger():
     )
 
 def __main():
-    global metrics
-    global devices
-    global read_devices_thread
-    global gc_devices_thread
+    global devices, metrics
+    global read_devices_thread, read_device_timer
+    global gc_devices_thread, gc_device_timer
+
     __configure_logger()
     info('Staring Up...')
 
     metrics['dev_num'] = Gauge("number_of_devices", "Number of detected devices")
     metrics['dev_num'].set_function(lambda: len(devices.keys()))
 
-    read_devices_thread = threading.Timer(15.0, read_devices)
+    read_devices_thread = threading.Timer(read_device_timer, read_devices)
     read_devices_thread.start()
 
-    gc_devices_thread = threading.Timer(7.0, gc_devices)
+    gc_devices_thread = threading.Timer(gc_device_timer, gc_devices)
     gc_devices_thread.start()
 
     signal(SIGINT, signal_handler)
@@ -113,7 +129,7 @@ def __main():
 
     start_http_server(
         addr = os.getenv('LISTEN_ADDR', '0.0.0.0'),
-        port = int(os.getenv('LISTEN_PORT', 8001)))
+        port = int(os.getenv('LISTEN_PORT', 8000)))
     debug('Start listeting for metric collectors connections')
 
     while True:
