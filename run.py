@@ -1,19 +1,18 @@
-from itertools import cycle
 import socket
 import sys
 import threading
 import requests
 import json
-from time import sleep, time as curr_time
 import os
-from logging import error, warning, info, debug, DEBUG, basicConfig as log_config
+from time import time as curr_time
+from logging import error, warning, info, debug, basicConfig as log_config
 from signal import signal, SIGTERM, SIGINT
-from prometheus_client import start_http_server, Summary, Counter, Gauge, Info
+from prometheus_client import start_http_server, Counter, Gauge, Info
 
 from metrics import metrics_settings
 
-read_device_interval = float(os.getenv('DEVICES_POOL_INTERVAL', 30))
-gc_device_interval = float(os.getenv('DEVICES_GC_INTERVAL', 300))
+READ_DEVICE_INTERVAL = float(os.getenv('DEVICES_POLL_INTERVAL', '30'))
+GC_DEVICE_INTERVAL = float(os.getenv('DEVICES_GC_INTERVAL', '300'))
 
 read_devices_thread = None
 gc_devices_thread = None
@@ -34,9 +33,9 @@ def set_metric_gauge(metric, data, labels=None):
 
 def update_metrics(device, data):
     global devices, metrics
-    labels = { 'sn':      device,
-               'address': devices[device]['address'],
-               'hw':      devices[device]['hw']}
+    labels = {'sn':      device,
+              'address': devices[device]['address'],
+              'hw':      devices[device]['hw']}
     for metric in data:
         metric_settings = metrics_settings.get(metric, {})
         if len(metric_settings) == 0:
@@ -48,6 +47,7 @@ def update_metrics(device, data):
             set_metric_gauge(metric, data[metric], labels)
         # TODO: Add other types of metric
 
+
 def gc_devices():
     global devices
     info('Devices GC process is started')
@@ -56,7 +56,8 @@ def gc_devices():
             warning('Devise %s is outdated. Removing' % device)
             del devices[device]
 
-def gc_devices_thread(interval=60):
+
+def gc_devices_threaded(interval=60):
     global devices
     global thread_exit_event
     cycle_start_time = curr_time()
@@ -65,7 +66,8 @@ def gc_devices_thread(interval=60):
             continue
         else:
             cycle_start_time = curr_time()
-        gc_devices
+        gc_devices()
+
 
 def read_device(device):
     global devices
@@ -80,14 +82,17 @@ def read_device(device):
         error('Reqesut for data from %s failed with code %s and message "%s"', devices[device]['address'], req.status_code, req.text)
         return None
 
+
 def read_devices():
-    global devices
+    global devices, metrics
     for device in devices.keys():
-        metric_data = read_device(device)
+        metric_data = None
+        with metrics['dev_poll_time'].labels(sn=device).time():
+            metric_data = read_device(device)
         update_metrics(device, metric_data)
 
 
-def read_devices_thread(interval=15):
+def read_devices_threaded(interval=15):
     global thread_exit_event
     cycle_start_time = curr_time()
     while not thread_exit_event.wait(0.1):
@@ -95,8 +100,9 @@ def read_devices_thread(interval=15):
             continue
         else:
             cycle_start_time = curr_time()
-        info('Start device pooling cycle')
+        info('Start device polling cycle')
         read_devices()
+
 
 def signal_handler(signal, frame):
     warning('Application was interrupted by signal. Exiting...')
@@ -105,34 +111,36 @@ def signal_handler(signal, frame):
 
 
 def thread_exception_hook(args):
-    global read_devices_thread, read_device_interval
-    global gc_devices_thread, gc_device_interval
+    global read_devices_thread, READ_DEVICE_INTERVAL
+    global gc_devices_thread, GC_DEVICE_INTERVAL
     error('Thread "%s" has failed. Recreating...', args.thread.name)
-    if args.thread.name == 'DevPoolThread':
-        run_devpool_thread()
+    if args.thread.name == 'DevPollThread':
+        run_devpoll_thread()
     elif args.thread.name == "DevicesGCThread":
         run_devgc_thread()
     else:
         error('Thread "%s" is uncnown! Panic!')
         sys.exit(1)
-        exit_app()
 
 
-def run_devpool_thread():
-    global read_devices_thread, read_device_interval
-    debug('Starting device pooling thread')
-    read_devices_thread = threading.Thread(target=read_devices_thread, name="DevPoolThread", kwargs={"interval": read_device_interval})
+def run_devpoll_thread():
+    global read_devices_thread, READ_DEVICE_INTERVAL
+    debug('Starting device polling thread')
+    read_devices_thread = threading.Thread(target=read_devices_threaded, name="DevPollThread", kwargs={"interval": READ_DEVICE_INTERVAL})
     read_devices_thread.start()
 
+
 def run_devgc_thread():
-    global gc_devices_thread, gc_device_interval
+    global gc_devices_thread, GC_DEVICE_INTERVAL
     debug('Starting GC thread')
-    gc_devices_thread = threading.Thread(target=gc_devices_thread, name="DevicesGCThread", kwargs={"interval": gc_device_interval} )
+    gc_devices_thread = threading.Thread(target=gc_devices_threaded, name="DevicesGCThread", kwargs={"interval": GC_DEVICE_INTERVAL})
     gc_devices_thread.start()
+
 
 def kill_app():
     pid = os.getpid()
     os.kill(pid, SIGTERM)
+
 
 def __configure_logger():
     log_config(
@@ -143,9 +151,10 @@ def __configure_logger():
 
 def __main():
     global devices, metrics
-    global read_devices_thread, read_device_interval
-    global gc_devices_thread, gc_device_interval
+    global read_devices_thread, READ_DEVICE_INTERVAL
+    global gc_devices_thread, GC_DEVICE_INTERVAL
     global thread_exit_event
+    global dev_poll_time
 
     __configure_logger()
     info('Staring Up...')
@@ -153,25 +162,27 @@ def __main():
     debug('Starting background threads')
     thread_exit_event = threading.Event()
     threading.excepthook = thread_exception_hook
-    run_devpool_thread()
+    run_devpoll_thread()
     run_devgc_thread()
 
     signal(SIGINT, signal_handler)
     signal(SIGTERM, signal_handler)
 
     debug('Starting UDP Broadcasts listeing')
-    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) # UDP
+    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     client.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     client.bind(("", 23500))
 
     debug('Start listeting for metric collectors connections')
     start_http_server(
-        addr = os.getenv('LISTEN_ADDR', '0.0.0.0'),
-        port = int(os.getenv('LISTEN_PORT', 8000)))
+        addr=os.getenv('LISTEN_ADDR', '0.0.0.0'),
+        port=int(os.getenv('LISTEN_PORT', 8000)))
 
     metrics['dev_num'] = Gauge("terneo_number_of_devices", "Number of detected devices")
     metrics['dev_num'].set_function(lambda: len(devices.keys()))
+    metrics['dev_poll_time'] = Gauge('terneo_device_polling_time', 'Device polling time', ['sn'])
+
 
     while True:
         new_device = True
@@ -188,7 +199,8 @@ def __main():
         if new_device:
             metric_data = read_device(device_sn)
             update_metrics(device_sn, metric_data)
-            info('New device was added to pool: sn=%s address=%s', device_sn, addr[0])
+            info('New device is found: sn=%s address=%s', device_sn, addr[0])
+
 
 if __name__ == "__main__":
     __main()
