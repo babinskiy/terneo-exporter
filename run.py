@@ -71,16 +71,24 @@ def gc_devices_threaded(interval=60):
 
 def read_device(device):
     global devices
+    device_address = devices[device]['address']
     debug("Start reading data from: %s" % device)
-    debug('Sending query to %s', devices[device]['address'])
-    req = requests.post("http://%s/api.cgi" % devices[device]['address'], data='{"cmd": 4}', timeout=5)
-    debug('Request result code: %s', req.status_code)
+    debug('Sending query to %s', device_address)
+    try:
+        req = requests.post("http://%s/api.cgi" % device_address, data='{"cmd": 4}', timeout=5)
+    except requests.RequestException as err:
+        error('Device request failed: %s', str(err))
+        return {'sn': device}
+    debug('Request result code: %s, data: %s', req.status_code, req.text)
     # debug('Returned data: %s', req.text)
     if req.status_code == 200:
-        return req.json()
+        try:
+            return req.json()
+        except requests.exceptions.JSONDecodeError:
+            error('Device reply decode failed. Device: %s, address: %s, reply: %s', device, device_address, req.text)
     else:
-        error('Reqesut for data from %s failed with code %s and message "%s"', devices[device]['address'], req.status_code, req.text)
-        return None
+        error('Device reqesut failed. Device: %s, Address: %s, code %s, message "%s"', device, device_address, req.status_code, req.text)
+    return {'sn': device}
 
 
 def read_devices():
