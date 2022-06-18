@@ -42,6 +42,7 @@ def update_metrics(device, data):
             warning('Unknown metric name: %s from %s', metric, device)
             continue
         metric_type = metric_settings.get('type', 'none')
+        labels['metric_key'] = metric
 
         if metric_type == 'gauge':
             set_metric_gauge(metric, data[metric], labels)
