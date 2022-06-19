@@ -13,6 +13,7 @@ from metrics import metrics_settings
 
 READ_DEVICE_INTERVAL = float(os.getenv('DEVICES_POLL_INTERVAL', '30'))
 GC_DEVICE_INTERVAL = float(os.getenv('DEVICES_GC_INTERVAL', '300'))
+GC_MAX_AGE = float(os.getenv('DEVICES_GC_AGE', 300))
 
 read_devices_thread = None
 gc_devices_thread = None
@@ -51,9 +52,10 @@ def update_metrics(device, data):
 
 def gc_devices():
     global devices
+    global GC_MAX_AGE
     info('Devices GC process is started')
     for device in devices.keys():
-        if curr_time() - devices[device]['lastSeen'] > 300:
+        if curr_time() - devices[device]['lastSeen'] > GC_MAX_AGE:
             warning('Devise %s is outdated. Removing' % device)
             del devices[device]
 
@@ -181,7 +183,7 @@ def __main():
     client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     client.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    client.bind(("", 23500))
+    client.bind((os.getenv('ANNOUNCE_LISTEN_ADDR', '0.0.0.0'), int(os.getenv('ANNOUNCE_LISTEN_PORT', 23500))))
 
     debug('Start listeting for metric collectors connections')
     start_http_server(
